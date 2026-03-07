@@ -8,4 +8,7 @@ export interface ChatSession {
   id: string;
   messages: Message[];
   systemPrompt: string;
+  title: string;
+  createdAt: string;
+  lastMessageAt: string;
 }

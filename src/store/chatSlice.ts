@@ -3,8 +3,11 @@ import {  ChatSession, Message } from "../type/chat";
 
 const initialState: ChatSession = {
   id: "",
+  title: "",
   systemPrompt: "",
   messages: [],
+  createdAt: new Date().toISOString(),
+  lastMessageAt: new Date().toISOString(),
 };
 
 const chatSlice = createSlice({

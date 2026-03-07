@@ -7,9 +7,7 @@ import axios from "axios";
 import { toast } from "sonner"
 
 export default function ModelSelector() {
-  const files = useSelector((state: RootState) => state.model.files);
-  const folder = useSelector((state: RootState) => state.model.folder);
-  const selected = useSelector((state: RootState) => state.model.selected);
+  const { files, folder, selected, provider } = useSelector((state: RootState) => state.model);
   const [loading, setLoading] = useState(false);
 
   const [hasSelect,setHasSelect] = useState(false);
@@ -17,6 +15,12 @@ export default function ModelSelector() {
   const dispatch = useDispatch();
 
   const loadModel=async ()=>{
+    if (provider === "ollama") {
+      dispatch(setHasLoaded(true));
+      toast(`已切换至 Ollama 模型: ${selected?.name}`);
+      return;
+    }
+
     setLoading(true)
     try {
       const filePath=folder+'/'+selected?.name

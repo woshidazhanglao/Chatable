@@ -1,6 +1,6 @@
 // Accordion.tsx
 import { useEffect, useState, forwardRef, useImperativeHandle } from "react";
-import axios from "axios";
+import { invoke } from "@tauri-apps/api/core";
 import { type ChatSession } from "../type/chat";
 
 interface AccordionProps {
@@ -18,10 +18,10 @@ const Accordion = forwardRef<AccordionHandle, AccordionProps>(
 
     const fetchSessions = async () => {
       try {
-        const res = await axios.get<ChatSession[]>("http://127.0.0.1:8000/sessions");
-        setSessions(res.data);
+        const data = await invoke<ChatSession[]>("get_sessions");
+        setSessions(data);
       } catch (err) {
-        console.error(err);
+        console.error("获取会话列表失败:", err);
       }
     };
 
@@ -31,6 +31,14 @@ const Accordion = forwardRef<AccordionHandle, AccordionProps>(
 
     useEffect(() => {
       fetchSessions();
+
+      // 监听全局刷新事件
+      const handleRefresh = () => fetchSessions();
+      window.addEventListener("refresh-sessions", handleRefresh);
+      
+      return () => {
+        window.removeEventListener("refresh-sessions", handleRefresh);
+      };
     }, []);
 
     return (
@@ -44,7 +52,7 @@ const Accordion = forwardRef<AccordionHandle, AccordionProps>(
               onChange={() => onSelectSession(session.id)}
             />
             <div className="collapse-title font-semibold">
-              {session.systemPrompt || `会话 ${idx + 1}`}
+              {session.title || `会话 ${idx + 1}`}
             </div>
             <div className="collapse-content text-sm">
               {session.messages.length > 0

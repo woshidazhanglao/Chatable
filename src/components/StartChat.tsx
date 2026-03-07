@@ -12,14 +12,7 @@ export default function StartChat({ startQuestion, setStartQuestion, handleStart
         (state: RootState) => state.model.hasLoaded
     );
   return (
-    <div className="flex  h-screen">
-      {/* 侧边栏按钮 */}
-      <div className="p-2 border-b flex mb-4">
-        <label htmlFor="left-drawer" className="btn btn-sm btn-primary">
-          会话列表
-        </label>
-      </div>
-
+    <div className="flex h-screen pt-12">
       <div className="flex flex-col flex-1 h-full w-full items-center justify-center">
         <input
         type="text"
