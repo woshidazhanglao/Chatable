@@ -8,9 +8,12 @@ interface StartChatProps {
 }
 
 export default function StartChat({ startQuestion, setStartQuestion, handleStartChat }: StartChatProps) {
-  const hasLoaded = useSelector(
-        (state: RootState) => state.model.hasLoaded
+  const { hasLoaded, provider, apiKey } = useSelector(
+        (state: RootState) => state.model
     );
+  
+  const canStart = provider === "third-party" ? !!apiKey : hasLoaded;
+
   return (
     <div className="flex h-screen pt-12">
       <div className="flex flex-col flex-1 h-full w-full items-center justify-center">
@@ -21,13 +24,13 @@ export default function StartChat({ startQuestion, setStartQuestion, handleStart
         value={startQuestion}
         onChange={(e) => setStartQuestion(e.target.value)}
         onKeyDown={(e) => {
-          if (e.key === "Enter") handleStartChat();
+          if (e.key === "Enter" && canStart && startQuestion.trim()) handleStartChat();
         }}
       />
 
       <button
         className="btn btn-primary mt-4"
-        disabled={!hasLoaded||!startQuestion.trim()}
+        disabled={!canStart || !startQuestion.trim()}
         onClick={handleStartChat}
       >
         提问并开始聊天

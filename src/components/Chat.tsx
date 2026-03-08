@@ -40,10 +40,17 @@ export default function Chat({ sessionId,firstQuestion }: ChatProps) {
     systemPrompt: ""
   });
 
-  const { systemPrompt: currentSystemPrompt } = useSelector((state: RootState) => state.chat);
-  const { hasLoaded, provider, apiKey, selected } = useSelector((state: RootState) => state.model);
+  const { systemPrompt: currentSystemPrompt, config } = useSelector((state: RootState) => state.chat);
+  const { hasLoaded, provider, apiKey, selected, apiUrl, modelName } = useSelector((state: RootState) => state.model);
 
   const dispatch = useDispatch();
+  const loadedSessionIdRef = useRef<string | null>(null);
+  
+  // 使用 Ref 实时追踪 Redux 状态，确保保存时总是使用最新值，且不触发副作用
+  const reduxStateRef = useRef({ systemPrompt: currentSystemPrompt, config });
+  useEffect(() => {
+    reduxStateRef.current = { systemPrompt: currentSystemPrompt, config };
+  }, [currentSystemPrompt, config]);
 
   // 同步草稿到 Redux
   useEffect(() => {
@@ -63,28 +70,55 @@ export default function Chat({ sessionId,firstQuestion }: ChatProps) {
     };
   }, [sessionTitle, sessionCreatedAt, sessionSystemPrompt]);
 
+  // 当提示词或参数修改时，自动同步到本地文件
+  useEffect(() => {
+    // 关键修复：只有当 Redux 中的数据确实属于当前 sessionId 时，才允许自动保存
+    // 防止在切换会话时，旧会话的参数覆盖新会话的配置
+    if (sessionId && loadedSessionIdRef.current === sessionId) {
+      const timer = setTimeout(() => {
+        saveCurrentSession(undefined, true);
+      }, 1000);
+      return () => clearTimeout(timer);
+    }
+  }, [currentSystemPrompt, config, sessionId]);
+
   // 离开页面或切换会话时持久化
   useEffect(() => {
+    // 每次 sessionId 改变时，立即重置加载状态锁
+    loadedSessionIdRef.current = null;
+    
     return () => {
-      // 卸载时使用最新的 Ref 数据进行保存
-      if (sessionId && messagesRef.current.length > 0) {
-        // 传入 true 表示仅是切换/卸载，不更新 lastMessageAt，防止误触发排序变更
-        saveCurrentSession(messagesRef.current, true).catch(err => {
-          console.error("卸载保存失败:", err);
-        });
+      // 卸载时保存，必须使用当前正在卸载的 sessionId
+      const currentId = sessionId;
+      if (currentId && (messagesRef.current.length > 0 || reduxStateRef.current.systemPrompt || reduxStateRef.current.config)) {
+        // 构造快照数据进行保存，防止异步干扰
+        const sessionToSave: ChatSession = {
+          id: currentId,
+          systemPrompt: reduxStateRef.current.systemPrompt,
+          config: reduxStateRef.current.config,
+          messages: messagesRef.current,
+          title: metadataRef.current.title || "新会话",
+          createdAt: metadataRef.current.createdAt || new Date().toLocaleString(),
+          lastMessageAt: metadataRef.current.createdAt || new Date().toLocaleString(),
+        };
+        invoke("save_session", { session: sessionToSave }).catch(err => console.error("卸载保存失败:", err));
       }
       dispatch(clearSession());
     };
-  }, [sessionId]);
+  }, [sessionId, dispatch]);
 
   const saveCurrentSession = async (updatedMessages?: Message[], isSwitching = false) => {
     if (!sessionId) return;
     
+    // 如果是自动保存（非手动发送消息），必须校验加载锁
+    if (isSwitching && loadedSessionIdRef.current !== sessionId) return;
+
     const msgs = updatedMessages ?? messagesRef.current;
-    if (msgs.length === 0) return;
 
     try {
       const meta = metadataRef.current;
+      const { systemPrompt: latestPrompt, config: latestConfig } = reduxStateRef.current;
+      
       let title = meta.title;
       // 如果还没有 title，且有 AI 的回复，则生成标题
       if (title === "新会话" || !title) {
@@ -97,7 +131,8 @@ export default function Chat({ sessionId,firstQuestion }: ChatProps) {
 
       const sessionToSave: ChatSession = {
         id: sessionId,
-        systemPrompt: meta.systemPrompt || currentSystemPrompt,
+        systemPrompt: latestPrompt,
+        config: latestConfig,
         messages: msgs,
         title: title || "新会话",
         createdAt: meta.createdAt || new Date().toLocaleString(),
@@ -142,11 +177,15 @@ export default function Chat({ sessionId,firstQuestion }: ChatProps) {
           setSessionSystemPrompt(session.systemPrompt);
           
           dispatch(setSession(session));
+          // 标记该会话已成功载入 Redux
+          loadedSessionIdRef.current = sessionId;
         } else if (firstQuestion) {
           // 如果是新会话
           setSessionTitle("新会话");
           setSessionCreatedAt(new Date().toLocaleString());
           setSessionSystemPrompt(currentSystemPrompt);
+          // 新会话默认已载入当前配置
+          loadedSessionIdRef.current = sessionId;
         }
       } catch (err) {
         console.error("加载会话失败", err);
@@ -207,7 +246,14 @@ export default function Chat({ sessionId,firstQuestion }: ChatProps) {
       setMessages((prev) => [...prev, assistantMsg]);
 
       let fullResponse = "";
-      const stream = askModelStream(fullMessages, provider === "third-party" ? "openai" : provider, apiKey, selected?.name);
+      const stream = askModelStream(
+        fullMessages, 
+        provider, 
+        apiKey, 
+        provider === "local" ? selected?.name : modelName, 
+        apiUrl,
+        config
+      );
 
       for await (const chunk of stream) {
         fullResponse += chunk;
@@ -307,27 +353,33 @@ export default function Chat({ sessionId,firstQuestion }: ChatProps) {
         onKeyDown={(e) => {
           if (e.key === "Enter" && !e.shiftKey) {
             e.preventDefault();
-            if(!hasLoaded){
-              toast("未载入模型")
+            const canSend = provider === "third-party" ? !!apiKey : hasLoaded;
+            if(!canSend){
+              toast(provider === "third-party" ? "请输入 API Key" : "未载入模型")
+              return;
             }
             if (!input.trim()){
               toast("未输入问题")
+              return;
             }
             sendMessage(false);
           }
         }}
       />
         <button className={`btn ml-2 self-center ${
-          !hasLoaded||!input.trim()
+          !(provider === "third-party" ? !!apiKey : hasLoaded) || !input.trim()
             ? " btn-active btn-error" 
             : " btn-active btn-primary"
         }`}
         onClick={()=>{
-          if(!hasLoaded){
-            toast("未载入模型")
+          const canSend = provider === "third-party" ? !!apiKey : hasLoaded;
+          if(!canSend){
+            toast(provider === "third-party" ? "请输入 API Key" : "未载入模型")
+            return;
           }
           if (!input.trim()){
             toast("未输入问题")
+            return;
           }
           sendMessage(false);
         }}

@@ -1,5 +1,4 @@
 export type ModelProvider = "local" | "ollama" | "third-party";
-export type ThirdPartyType = "deepseek" | "openai" | "other";
 
 export interface GGUFFile {
   name: string;
@@ -16,7 +15,9 @@ export type ModelState = {
   selected?: GGUFFile | null;
   hasLoaded: boolean;
   provider: ModelProvider;
-  thirdPartyType?: ThirdPartyType;
+  apiUrl?: string;
+  thirdPartyType?: string;
   apiKey?: string;
+  modelName?: string;
 };
 

@@ -1,10 +1,20 @@
 import { createSlice, PayloadAction } from "@reduxjs/toolkit";
-import {  ChatSession, Message } from "../type/chat";
+import {  ChatSession, Message, ModelConfig } from "../type/chat";
+
+const defaultModelConfig: ModelConfig = {
+  temperature: 0.7,
+  topP: 0.9,
+  topK: 40,
+  repeatPenalty: 1.1,
+  contextSize: 4096,
+  maxTokens: 2048,
+};
 
 const initialState: ChatSession = {
   id: "",
   title: "",
   systemPrompt: "",
+  config: defaultModelConfig,
   messages: [],
   createdAt: new Date().toISOString(),
   lastMessageAt: new Date().toISOString(),
@@ -16,12 +26,24 @@ const chatSlice = createSlice({
   reducers: {
     // 设置当前会话（数据库加载后）
     setSession(state, action: PayloadAction<ChatSession>) {
-      return action.payload; // 直接覆盖
+      const session = action.payload;
+      if (!session.config) {
+        session.config = defaultModelConfig;
+      }
+      return session;
     },
 
     // 更新系统提示词
     updateSystemPrompt(state, action: PayloadAction<string>) {
       state.systemPrompt = action.payload;
+    },
+
+    // 更新模型配置
+    updateModelConfig(state, action: PayloadAction<Partial<ModelConfig>>) {
+      if (!state.config) {
+        state.config = defaultModelConfig;
+      }
+      state.config = { ...state.config, ...action.payload };
     },
 
     // 添加一条消息
@@ -36,6 +58,6 @@ const chatSlice = createSlice({
   },
 });
 
-export const { setSession, updateSystemPrompt, addMessage, clearSession } =
+export const { setSession, updateSystemPrompt, updateModelConfig, addMessage, clearSession } =
   chatSlice.actions;
 export default chatSlice.reducer;

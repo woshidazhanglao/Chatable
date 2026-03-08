@@ -1,18 +1,19 @@
 use serde::{Serialize, Deserialize};
 use serde_json;
 use std::fs;
-use std::sync::Arc;
 use walkdir::WalkDir;
 use chrono::{DateTime, Local};
 use tauri::{State, ipc::Channel};
 use tokio::sync::Mutex;
+use futures_util::StreamExt;
+use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE};
 use llama_cpp_2::{
     context::params::LlamaContextParams,
     llama_backend::LlamaBackend,
     model::params::LlamaModelParams,
     model::LlamaModel,
-    token::data_array::LlamaTokenDataArray,
     model::Special,
+    sampling::LlamaSampler,
 };
 
 #[derive(Serialize)]
@@ -36,11 +37,23 @@ struct Message {
 
 #[derive(Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
+struct ModelConfig {
+    temperature: f32,
+    top_p: f32,
+    top_k: i32,
+    repeat_penalty: f32,
+    context_size: i32,
+    max_tokens: i32,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
 struct ChatSession {
     id: String,
     messages: Vec<Message>,
     #[serde(rename = "systemPrompt")]
     system_prompt: String,
+    config: Option<ModelConfig>,
     created_at: String,
     last_message_at: String,
     title: String,
@@ -108,7 +121,7 @@ async fn unload_local_model(state: State<'_, LlamaState>) -> Result<String, Stri
     Ok("模型已成功卸载".to_string())
 }
 
-#[derive(Deserialize)]
+#[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ChatMessage {
     role: String,
@@ -119,12 +132,13 @@ struct ChatMessage {
 async fn chat_local(
     state: State<'_, LlamaState>,
     messages: Vec<ChatMessage>,
+    config: ModelConfig,
     on_token: Channel<String>,
 ) -> Result<(), String> {
     let model_guard = state.model.lock().await;
     let model = model_guard.as_ref().ok_or("模型未载入")?;
 
-    // 1. 构造 Prompt (简单的 ChatML 格式)
+    // ... (Prompt 构造逻辑保持不变)
     let mut prompt = String::new();
     for msg in messages {
         let role = if msg.role == "user" { "user" } else { "assistant" };
@@ -132,8 +146,12 @@ async fn chat_local(
     }
     prompt.push_str("<|im_start|>assistant\n");
 
-    // 2. 初始化上下文
-    let ctx_params = LlamaContextParams::default();
+    // 2. 初始化上下文，使用传入的 context_size
+    let mut ctx_params = LlamaContextParams::default();
+    if let Some(n_ctx) = std::num::NonZeroU32::new(config.context_size as u32) {
+        ctx_params = ctx_params.with_n_ctx(Some(n_ctx));
+    }
+    
     let mut ctx = model
         .new_context(&state.backend, ctx_params)
         .map_err(|e| format!("创建上下文失败: {}", e))?;
@@ -151,14 +169,21 @@ async fn chat_local(
 
     ctx.decode(&mut batch).map_err(|e| format!("解码失败: {}", e))?;
 
-    // 5. 生成循环
+    // 5. 初始化采样器链
+    // 按照温度、Top-K、Top-P、重复惩罚的顺序构造采样逻辑
+    let mut sampler = LlamaSampler::chain_simple([
+        LlamaSampler::penalties(64, config.repeat_penalty, 0.0, 0.0),
+        LlamaSampler::top_k(config.top_k),
+        LlamaSampler::top_p(config.top_p, 1),
+        LlamaSampler::temp(config.temperature),
+        LlamaSampler::dist(Local::now().timestamp_subsec_nanos()),
+    ]);
+
+    // 6. 生成循环
     let mut n_cur = tokens.len();
-    while n_cur < 2048 { // 最大生成长度
-        let candidates = ctx.candidates_ith(batch.n_tokens() - 1);
-        let mut candidates_p = LlamaTokenDataArray::from_iter(candidates, false);
-        
-        // 采样 (简单的 Greedy Search)
-        let token = candidates_p.sample_token_greedy();
+    while n_cur < (config.max_tokens as usize + tokens.len()) && n_cur < config.context_size as usize {
+        // 使用采样器从上下文获取 token
+        let token = sampler.sample(&ctx, batch.n_tokens() as i32 - 1);
         
         // 检查停止符
         if model.is_eog_token(token) {
@@ -167,8 +192,11 @@ async fn chat_local(
 
         // 转换回文本并发送
         let piece = model.token_to_str(token, Special::Plaintext)
-    .map_err(|e| e.to_string())?;
+            .map_err(|e| e.to_string())?;
         on_token.send(piece).map_err(|e| e.to_string())?;
+
+        // 告知采样器接受了该 token 以更新其内部状态（如重复惩罚）
+        sampler.accept(token);
 
         // 准备下一轮解码
         batch.clear();
@@ -178,6 +206,114 @@ async fn chat_local(
     }
 
     Ok(())
+}
+
+#[tauri::command]
+async fn chat_third_party(
+    api_url: String,
+    api_key: String,
+    model_name: String,
+    messages: Vec<ChatMessage>,
+    config: ModelConfig,
+    on_token: Channel<String>,
+) -> Result<(), String> {
+    let client = reqwest::Client::new();
+    
+    let mut headers = HeaderMap::new();
+    headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+    if !api_key.is_empty() {
+        headers.insert(AUTHORIZATION, HeaderValue::from_str(&format!("Bearer {}", api_key)).map_err(|e| e.to_string())?);
+    }
+
+    let body = serde_json::json!({
+        "model": model_name,
+        "messages": messages,
+        "stream": true,
+        "temperature": config.temperature,
+        "top_p": config.top_p,
+        "max_tokens": config.max_tokens
+    });
+
+    let response = client.post(&api_url)
+        .headers(headers)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    if !response.status().is_success() {
+        let error_text = response.text().await.unwrap_or_else(|_| "Unknown error".to_string());
+        return Err(format!("API request failed: {}", error_text));
+    }
+
+    let mut stream = response.bytes_stream();
+
+    while let Some(item) = stream.next().await {
+        let chunk = item.map_err(|e| e.to_string())?;
+        let text = String::from_utf8_lossy(&chunk);
+        
+        for line in text.lines() {
+            if line.is_empty() { continue; }
+            if line.starts_with("data: ") {
+                let data = &line[6..];
+                if data == "[DONE]" {
+                    break;
+                }
+                if let Ok(json) = serde_json::from_str::<serde_json::Value>(data) {
+                    if let Some(content) = json["choices"][0]["delta"]["content"].as_str() {
+                        on_token.send(content.to_string()).map_err(|e| e.to_string())?;
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+#[tauri::command]
+async fn list_third_party_models(
+    api_url: String,
+    api_key: String,
+) -> Result<Vec<String>, String> {
+    let client = reqwest::Client::new();
+    
+    let mut headers = HeaderMap::new();
+    headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+    if !api_key.is_empty() {
+        headers.insert(AUTHORIZATION, HeaderValue::from_str(&format!("Bearer {}", api_key)).map_err(|e| e.to_string())?);
+    }
+
+    // 尝试构造 models 接口地址
+    let models_url = if api_url.ends_with("/chat/completions") {
+        api_url.replace("/chat/completions", "/models")
+    } else {
+        format!("{}/models", api_url.trim_end_matches('/'))
+    };
+
+    let response = client.get(&models_url)
+        .headers(headers)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    if !response.status().is_success() {
+        let error_text = response.text().await.unwrap_or_else(|_| "Unknown error".to_string());
+        return Err(format!("Failed to fetch models: {}", error_text));
+    }
+
+    let json: serde_json::Value = response.json().await.map_err(|e| e.to_string())?;
+    
+    let mut models = Vec::new();
+    if let Some(data) = json["data"].as_array() {
+        for item in data {
+            if let Some(id) = item["id"].as_str() {
+                models.push(id.to_string());
+            }
+        }
+    }
+
+    Ok(models)
 }
 
 #[tauri::command]
@@ -256,6 +392,8 @@ fn main() {
             load_local_model, 
             unload_local_model,
             chat_local,
+            chat_third_party,
+            list_third_party_models,
             get_sessions,
             get_session,
             save_session

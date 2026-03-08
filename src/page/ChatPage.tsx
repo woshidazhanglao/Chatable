@@ -19,7 +19,7 @@ export default function ChatPage() {
   const [startQuestion, setStartQuestion] = useState(draft);
   const [firstQuestion, setFirstQuestion] = useState(""); 
   const dispatch=useDispatch()
-  const systemPrompt = useSelector((state: RootState) => state.chat.systemPrompt);
+  const { systemPrompt, config } = useSelector((state: RootState) => state.chat);
 
   const accordionRef = useRef<AccordionHandle>(null);
 
@@ -53,6 +53,7 @@ export default function ChatPage() {
     const newSession: ChatSession = {
       id: sessionId,
       systemPrompt,
+      config,
       messages: [],
       title: "新会话",
       createdAt: now,
@@ -112,7 +113,8 @@ export default function ChatPage() {
       </div>
   )}
 
-      <div className="w-92 p-4 p-3">
+   
+      <div className="hidden lg:flex w-80 xl:w-96 flex-col border-l border-gray-100 p-4 overflow-hidden">
         <PromptEditor />
       </div>
   </div>

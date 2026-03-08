@@ -1,30 +1,58 @@
-import { type Message } from "../type/chat";
+import { type Message, type ModelConfig } from "../type/chat";
 import { invoke, Channel } from "@tauri-apps/api/core";
 
 export async function* askModelStream(
   messages: Message[],
-  provider: "local" | "deepseek" | "openai" | "ollama",
+  provider: "local" | "third-party" | "ollama",
   apiKey?: string,
-  modelName?: string
+  modelName?: string,
+  apiUrl?: string,
+  config?: ModelConfig
 ) {
-  if (provider === "local") {
-    // 使用 Tauri Channel 实现本地流式输出
+  if (provider === "local" || provider === "third-party") {
+    // 使用 Tauri Channel 实现流式输出
     const onToken = new Channel<string>();
     
-    // 我们需要一个变量来存储接收到的 token
     const tokenQueue: string[] = [];
     let isDone = false;
+    let error: any = null;
 
     onToken.onmessage = (token: string) => {
       tokenQueue.push(token);
     };
 
+    const command = provider === "local" ? "chat_local" : "chat_third_party";
+    
+    let args: any;
+    if (provider === "local") {
+      args = { 
+        messages: messages.map(m => ({ role: m.role, content: m.content })),
+        config,
+        onToken 
+      };
+    } else {
+      // 确保 URL 格式正确
+      let finalUrl = apiUrl || "";
+      if (finalUrl && !finalUrl.includes("/chat/completions")) {
+        finalUrl = finalUrl.replace(/\/$/, "") + "/chat/completions";
+      }
+      
+      args = {
+        apiUrl: finalUrl,
+        apiKey: apiKey || "",
+        modelName: modelName || "gpt-3.5-turbo",
+        messages: messages.map(m => ({ role: m.role, content: m.content })),
+        config,
+        onToken
+      };
+    }
+
     // 调用 Rust 后端
-    const chatPromise = invoke("chat_local", { 
-      messages: messages.map(m => ({ role: m.role, content: m.content })),
-      onToken 
-    }).then(() => {
+    const chatPromise = invoke(command, args).then(() => {
       isDone = true;
+    }).catch((err) => {
+      isDone = true;
+      error = err;
     });
 
     // 循环生成器
@@ -34,9 +62,10 @@ export async function* askModelStream(
       } else {
         await new Promise(resolve => setTimeout(resolve, 10));
       }
+      if (error) throw new Error(error);
     }
     
-    await chatPromise; // 确保错误被捕获
+    await chatPromise; 
     return;
   }
 
@@ -44,15 +73,7 @@ export async function* askModelStream(
   let headers: Record<string, string> = { "Content-Type": "application/json" };
   let body: any = { messages };
 
-  if (provider === "deepseek") {
-    url = "https://api.deepseek.com/chat/completions";
-    headers["Authorization"] = `Bearer ${apiKey}`;
-    body = {
-      model: modelName || "deepseek-chat",
-      messages: messages.map(m => ({ role: m.role, content: m.content })),
-      stream: true
-    };
-  } else if (provider === "ollama") {
+  if (provider === "ollama") {
     url = "http://localhost:11434/api/chat";
     body = {
       model: modelName || "llama3",

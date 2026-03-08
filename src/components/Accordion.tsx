@@ -42,19 +42,19 @@ const Accordion = forwardRef<AccordionHandle, AccordionProps>(
     }, []);
 
     return (
-      <div className="join join-vertical bg-base-100">
+      <div className="menu bg-base-100 p-0 w-full overflow-hidden rounded-lg">
         {sessions.map((session, idx) => (
-          <div key={session.id} className="collapse collapse-arrow join-item border-base-300 border">
+          <div key={session.id} className="collapse collapse-arrow border-b border-base-300 rounded-none last:border-b-0">
             <input
               type="radio"
               name="my-accordion-4"
               checked={selectedSessionId === session.id}
               onChange={() => onSelectSession(session.id)}
             />
-            <div className="collapse-title font-semibold">
+            <div className="collapse-title font-semibold pr-10 truncate">
               {session.title || `会话 ${idx + 1}`}
             </div>
-            <div className="collapse-content text-sm">
+            <div className="collapse-content text-sm text-gray-500 line-clamp-2 overflow-hidden">
               {session.messages.length > 0
                 ? session.messages[session.messages.length - 1].content
                 : "暂无消息"}
