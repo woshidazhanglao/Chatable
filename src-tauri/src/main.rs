@@ -15,6 +15,8 @@ use llama_cpp_2::{
     model::Special,
     sampling::LlamaSampler,
 };
+use faiss::{Index, Idx, FlatIndex, index_factory, MetricType};
+use ndarray::Array1;
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -54,15 +56,178 @@ struct ChatSession {
     #[serde(rename = "systemPrompt")]
     system_prompt: String,
     config: Option<ModelConfig>,
+    character_id: Option<String>,
+    world_id: Option<String>,
     created_at: String,
     last_message_at: String,
     title: String,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct Character {
+    id: String,
+    name: String,
+    description: String,
+    first_mes: String,
+    mes_example: String,
+    avatar: Option<String>,
+    creator_notes: Option<String>,
+    system_prompt: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct WorldEntry {
+    id: String,
+    keys: String,
+    content: String,
+    enabled: bool,
+    depth: Option<i32>,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct WorldBook {
+    id: String,
+    name: String,
+    entries: Vec<WorldEntry>,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct ArenaParticipant {
+    character_id: String,
+    model_config: ModelConfig,
+    messages: Vec<Message>,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct ArenaSession {
+    id: String,
+    title: String,
+    scenario: String,
+    world_book_id: Option<String>,
+    participant_a: ArenaParticipant,
+    participant_b: ArenaParticipant,
+    shared_history: Vec<Message>,
+    created_at: String,
+    last_message_at: String,
 }
 
 struct LlamaState {
     backend: LlamaBackend,
     model: Mutex<Option<LlamaModel>>,
     sessions_dir: std::path::PathBuf,
+    characters_dir: std::path::PathBuf,
+    worlds_dir: std::path::PathBuf,
+    arenas_dir: std::path::PathBuf,
+    indices_dir: std::path::PathBuf,
+}
+
+// 辅助函数：生成文本向量
+async fn get_text_embedding(
+    state: &LlamaState,
+    text: &str,
+) -> Result<Vec<f32>, String> {
+    let model_guard = state.model.lock().await;
+    let model = model_guard.as_ref().ok_or("模型未载入，无法生成向量")?;
+
+    let mut ctx_params = LlamaContextParams::default();
+    ctx_params = ctx_params.with_embeddings(true);
+    
+    let mut ctx = model
+        .new_context(&state.backend, ctx_params)
+        .map_err(|e| format!("创建 Embedding 上下文失败: {}", e))?;
+
+    let tokens = model
+        .str_to_token(text, llama_cpp_2::model::AddBos::Always)
+        .map_err(|e| format!("Tokenize 失败: {}", e))?;
+
+    let mut batch = llama_cpp_2::llama_batch::LlamaBatch::new(tokens.len(), 1);
+    for (i, &token) in tokens.iter().enumerate() {
+        batch.add(token, i as i32, &[0], i == tokens.len() - 1);
+    }
+
+    ctx.decode(&mut batch).map_err(|e| format!("Embedding 解码失败: {}", e))?;
+
+    // 获取最后一个 token 的 embedding 作为文本表示
+    let embeddings = ctx.embeddings_ith(batch.n_tokens() - 1)
+        .map_err(|e| format!("获取 Embedding 失败: {}", e))?;
+
+    Ok(embeddings.to_vec())
+}
+
+#[tauri::command]
+async fn search_relevant_context(
+    state: State<'_, LlamaState>,
+    query: String,
+    index_id: String,
+    top_k: usize,
+) -> Result<Vec<String>, String> {
+    let index_path = state.indices_dir.join(format!("{}.index", index_id));
+    let map_path = state.indices_dir.join(format!("{}.map", index_id));
+
+    if !index_path.exists() || !map_path.exists() {
+        return Ok(Vec::new());
+    }
+
+    // 1. 生成查询向量
+    let query_vec = get_text_embedding(&state, &query).await?;
+    
+    // 2. 加载 Faiss 索引
+    let mut index = faiss::read_index(index_path.to_str().unwrap())
+        .map_err(|e| format!("读取索引失败: {}", e))?;
+    
+    // 3. 搜索
+    let result = index.search(&query_vec, top_k)
+        .map_err(|e| format!("搜索失败: {}", e))?;
+    
+    // 4. 加载映射表并返回内容
+    let map_content = fs::read_to_string(map_path).map_err(|e| e.to_string())?;
+    let text_map: Vec<String> = serde_json::from_str(&map_content).map_err(|e| e.to_string())?;
+    
+    let mut relevant_texts = Vec::new();
+    for &id in &result.labels {
+        if let Some(val) = id.get() {
+            if let Some(text) = text_map.get(val as usize) {
+                relevant_texts.push(text.clone());
+            }
+        }
+    }
+
+    Ok(relevant_texts)
+}
+
+#[tauri::command]
+async fn rebuild_index(
+    state: State<'_, LlamaState>,
+    index_id: String,
+    texts: Vec<String>,
+) -> Result<(), String> {
+    if texts.is_empty() { return Ok(()); }
+
+    let mut embeddings = Vec::new();
+    for text in &texts {
+        let vec = get_text_embedding(&state, text).await?;
+        embeddings.extend(vec);
+    }
+
+    let dim = (embeddings.len() / texts.len()) as u32;
+    let mut index = FlatIndex::new_l2(dim).map_err(|e| e.to_string())?;
+    index.add(&embeddings).map_err(|e| e.to_string())?;
+
+    let index_path = state.indices_dir.join(format!("{}.index", index_id));
+    let map_path = state.indices_dir.join(format!("{}.map", index_id));
+
+    faiss::write_index(&index, index_path.to_str().unwrap())
+        .map_err(|e| format!("写入索引失败: {}", e))?;
+    
+    let map_content = serde_json::to_string(&texts).map_err(|e| e.to_string())?;
+    fs::write(map_path, map_content).map_err(|e| e.to_string())?;
+
+    Ok(())
 }
 
 #[tauri::command]
@@ -370,13 +535,153 @@ fn save_session(state: State<'_, LlamaState>, session: ChatSession) -> Result<()
     Ok(())
 }
 
+#[tauri::command]
+fn get_characters(state: State<'_, LlamaState>) -> Result<Vec<Character>, String> {
+    let mut characters = Vec::new();
+    if !state.characters_dir.exists() {
+        let _ = fs::create_dir_all(&state.characters_dir);
+        return Ok(characters);
+    }
+    let entries = fs::read_dir(&state.characters_dir).map_err(|e| e.to_string())?;
+    for entry in entries.filter_map(|e| e.ok()) {
+        let path = entry.path();
+        if path.extension().and_then(|s| s.to_str()) == Some("json") {
+            if let Ok(content) = fs::read_to_string(&path) {
+                if let Ok(character) = serde_json::from_str::<Character>(&content) {
+                    characters.push(character);
+                }
+            }
+        }
+    }
+    Ok(characters)
+}
+
+#[tauri::command]
+fn save_character(state: State<'_, LlamaState>, character: Character) -> Result<(), String> {
+    if !state.characters_dir.exists() {
+        fs::create_dir_all(&state.characters_dir).map_err(|e| e.to_string())?;
+    }
+    let path = state.characters_dir.join(format!("{}.json", character.id));
+    let content = serde_json::to_string_pretty(&character).map_err(|e| e.to_string())?;
+    fs::write(path, content).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+fn delete_character(state: State<'_, LlamaState>, id: String) -> Result<(), String> {
+    let path = state.characters_dir.join(format!("{}.json", id));
+    if path.exists() {
+        fs::remove_file(path).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn get_world_books(state: State<'_, LlamaState>) -> Result<Vec<WorldBook>, String> {
+    let mut books = Vec::new();
+    if !state.worlds_dir.exists() {
+        let _ = fs::create_dir_all(&state.worlds_dir);
+        return Ok(books);
+    }
+    let entries = fs::read_dir(&state.worlds_dir).map_err(|e| e.to_string())?;
+    for entry in entries.filter_map(|e| e.ok()) {
+        let path = entry.path();
+        if path.extension().and_then(|s| s.to_str()) == Some("json") {
+            if let Ok(content) = fs::read_to_string(&path) {
+                if let Ok(book) = serde_json::from_str::<WorldBook>(&content) {
+                    books.push(book);
+                }
+            }
+        }
+    }
+    Ok(books)
+}
+
+#[tauri::command]
+fn save_world_book(state: State<'_, LlamaState>, book: WorldBook) -> Result<(), String> {
+    if !state.worlds_dir.exists() {
+        fs::create_dir_all(&state.worlds_dir).map_err(|e| e.to_string())?;
+    }
+    let path = state.worlds_dir.join(format!("{}.json", book.id));
+    let content = serde_json::to_string_pretty(&book).map_err(|e| e.to_string())?;
+    fs::write(path, content).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+fn delete_world_book(state: State<'_, LlamaState>, id: String) -> Result<(), String> {
+    let path = state.worlds_dir.join(format!("{}.json", id));
+    if path.exists() {
+        fs::remove_file(path).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn get_arenas(state: State<'_, LlamaState>) -> Result<Vec<ArenaSession>, String> {
+    let mut arenas = Vec::new();
+    if !state.arenas_dir.exists() {
+        let _ = fs::create_dir_all(&state.arenas_dir);
+        return Ok(arenas);
+    }
+    let entries = fs::read_dir(&state.arenas_dir).map_err(|e| e.to_string())?;
+    for entry in entries.filter_map(|e| e.ok()) {
+        let path = entry.path();
+        if path.extension().and_then(|s| s.to_str()) == Some("json") {
+            if let Ok(content) = fs::read_to_string(&path) {
+                if let Ok(arena) = serde_json::from_str::<ArenaSession>(&content) {
+                    arenas.push(arena);
+                }
+            }
+        }
+    }
+    arenas.sort_by(|a, b| b.last_message_at.cmp(&a.last_message_at));
+    Ok(arenas)
+}
+
+#[tauri::command]
+fn save_arena(state: State<'_, LlamaState>, arena: ArenaSession) -> Result<(), String> {
+    if !state.arenas_dir.exists() {
+        fs::create_dir_all(&state.arenas_dir).map_err(|e| e.to_string())?;
+    }
+    let path = state.arenas_dir.join(format!("{}.json", arena.id));
+    let content = serde_json::to_string_pretty(&arena).map_err(|e| e.to_string())?;
+    fs::write(path, content).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+fn delete_arena(state: State<'_, LlamaState>, id: String) -> Result<(), String> {
+    let path = state.arenas_dir.join(format!("{}.json", id));
+    if path.exists() {
+        fs::remove_file(path).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn delete_session(state: State<'_, LlamaState>, id: String) -> Result<(), String> {
+    let path = state.sessions_dir.join(format!("{}.json", id));
+    if path.exists() {
+        fs::remove_file(path).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
 fn main() {
     let backend = LlamaBackend::init().unwrap();
     
     // 使用指定的持久化路径
     let sessions_dir = std::path::PathBuf::from("F:\\React\\project\\session");
-    if !sessions_dir.exists() {
-        let _ = fs::create_dir_all(&sessions_dir);
+    let characters_dir = std::path::PathBuf::from("F:\\React\\project\\characters");
+    let worlds_dir = std::path::PathBuf::from("F:\\React\\project\\worlds");
+    let arenas_dir = std::path::PathBuf::from("F:\\React\\project\\arenas");
+    let indices_dir = std::path::PathBuf::from("F:\\React\\project\\indices");
+
+    for dir in &[&sessions_dir, &characters_dir, &worlds_dir, &arenas_dir, &indices_dir] {
+        if !dir.exists() {
+            let _ = fs::create_dir_all(dir);
+        }
     }
 
     tauri::Builder::default()
@@ -384,6 +689,10 @@ fn main() {
             backend,
             model: Mutex::new(None),
             sessions_dir,
+            characters_dir,
+            worlds_dir,
+            arenas_dir,
+            indices_dir,
         })
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_dialog::init())
@@ -396,7 +705,19 @@ fn main() {
             list_third_party_models,
             get_sessions,
             get_session,
-            save_session
+            save_session,
+            get_characters,
+            save_character,
+            delete_character,
+            get_world_books,
+            save_world_book,
+            delete_world_book,
+            get_arenas,
+            save_arena,
+            delete_arena,
+            delete_session,
+            search_relevant_context,
+            rebuild_index
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

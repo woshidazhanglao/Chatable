@@ -15,6 +15,8 @@ const initialState: ChatSession = {
   title: "",
   systemPrompt: "",
   config: defaultModelConfig,
+  characterId: undefined,
+  worldId: undefined,
   messages: [],
   createdAt: new Date().toISOString(),
   lastMessageAt: new Date().toISOString(),
@@ -38,6 +40,16 @@ const chatSlice = createSlice({
       state.systemPrompt = action.payload;
     },
 
+    // 更新关联角色
+    setCharacterId(state, action: PayloadAction<string | undefined>) {
+      state.characterId = action.payload;
+    },
+
+    // 更新关联世界书
+    setWorldId(state, action: PayloadAction<string | undefined>) {
+      state.worldId = action.payload;
+    },
+
     // 更新模型配置
     updateModelConfig(state, action: PayloadAction<Partial<ModelConfig>>) {
       if (!state.config) {
@@ -51,6 +63,11 @@ const chatSlice = createSlice({
       state.messages.push(action.payload);
     },
 
+    // 设置消息列表（用于回退或编辑）
+    setMessages(state, action: PayloadAction<Message[]>) {
+      state.messages = action.payload;
+    },
+
     // 清空会话（比如退出或新建时）
     clearSession() {
       return initialState;
@@ -58,6 +75,14 @@ const chatSlice = createSlice({
   },
 });
 
-export const { setSession, updateSystemPrompt, updateModelConfig, addMessage, clearSession } =
-  chatSlice.actions;
+export const { 
+  setSession, 
+  updateSystemPrompt, 
+  setCharacterId,
+  setWorldId,
+  updateModelConfig, 
+  addMessage, 
+  setMessages,
+  clearSession 
+} = chatSlice.actions;
 export default chatSlice.reducer;

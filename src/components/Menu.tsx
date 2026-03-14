@@ -61,6 +61,45 @@ export default function Menu() {
         <a
           href="#"
           className="tooltip tooltip-right mb-4"
+          data-tip="Character"
+          onClick={(e) => {
+            e.preventDefault();
+            navigate("/CharacterPage");
+          }}
+        >
+          <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#ffffff" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2"></path><circle cx="12" cy="7" r="4"></circle></svg>
+        </a>
+      </li>
+      <li>
+        <a
+          href="#"
+          className="tooltip tooltip-right mb-4"
+          data-tip="World"
+          onClick={(e) => {
+            e.preventDefault();
+            navigate("/WorldPage");
+          }}
+        >
+          <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#ffffff" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"></circle><line x1="2" y1="12" x2="22" y2="12"></line><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"></path></svg>
+        </a>
+      </li>
+      <li>
+        <a
+          href="#"
+          className="tooltip tooltip-right mb-4"
+          data-tip="Arena"
+          onClick={(e) => {
+            e.preventDefault();
+            navigate("/ArenaPage");
+          }}
+        >
+          <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#ffffff" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M14.5 21l-5-5 5-5 5 5-5 5z"></path><path d="M22 12l-5-5-5 5 5 5 5-5z"></path><path d="M12 22l-5-5 5-5 5 5-5 5z"></path><path d="M9.5 14.5l-5-5 5-5 5 5-5 5z"></path></svg>
+        </a>
+      </li>
+      <li>
+        <a
+          href="#"
+          className="tooltip tooltip-right mb-4"
           data-tip="Model"
           onClick={(e) => {
             e.preventDefault(); // 阻止 a 默认跳转

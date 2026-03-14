@@ -18,6 +18,8 @@ export interface ChatSession {
   messages: Message[];
   systemPrompt: string;
   config?: ModelConfig;
+  characterId?: string;
+  worldId?: string;
   title: string;
   createdAt: string;
   lastMessageAt: string;

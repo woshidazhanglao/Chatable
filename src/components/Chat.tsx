@@ -5,9 +5,10 @@ import { useSelector,useDispatch } from "react-redux";
 import { RootState } from "../store/store";
 import { askModelStream } from "../utils/chat";
 import { toast } from "sonner"
-import { addMessage, clearSession, setSession } from "../store/chatSlice";
+import { addMessage, clearSession, setSession, setMessages as setReduxMessages } from "../store/chatSlice";
 import { invoke } from "@tauri-apps/api/core";
 import { setDraft, clearDraft } from "../store/uiSlice";
+import { RotateCcw } from "lucide-react";
 
 interface ChatProps {
   sessionId: string;
@@ -40,17 +41,19 @@ export default function Chat({ sessionId,firstQuestion }: ChatProps) {
     systemPrompt: ""
   });
 
-  const { systemPrompt: currentSystemPrompt, config } = useSelector((state: RootState) => state.chat);
+  const { systemPrompt: currentSystemPrompt, config, characterId, worldId } = useSelector((state: RootState) => state.chat);
   const { hasLoaded, provider, apiKey, selected, apiUrl, modelName } = useSelector((state: RootState) => state.model);
+  const { characters } = useSelector((state: RootState) => state.character);
+  const { books: worldBooks } = useSelector((state: RootState) => state.world);
 
   const dispatch = useDispatch();
   const loadedSessionIdRef = useRef<string | null>(null);
   
   // 使用 Ref 实时追踪 Redux 状态，确保保存时总是使用最新值，且不触发副作用
-  const reduxStateRef = useRef({ systemPrompt: currentSystemPrompt, config });
+  const reduxStateRef = useRef({ systemPrompt: currentSystemPrompt, config, characterId, worldId });
   useEffect(() => {
-    reduxStateRef.current = { systemPrompt: currentSystemPrompt, config };
-  }, [currentSystemPrompt, config]);
+    reduxStateRef.current = { systemPrompt: currentSystemPrompt, config, characterId, worldId };
+  }, [currentSystemPrompt, config, characterId, worldId]);
 
   // 同步草稿到 Redux
   useEffect(() => {
@@ -80,7 +83,7 @@ export default function Chat({ sessionId,firstQuestion }: ChatProps) {
       }, 1000);
       return () => clearTimeout(timer);
     }
-  }, [currentSystemPrompt, config, sessionId]);
+  }, [currentSystemPrompt, config, characterId, worldId, sessionId]);
 
   // 离开页面或切换会话时持久化
   useEffect(() => {
@@ -117,7 +120,12 @@ export default function Chat({ sessionId,firstQuestion }: ChatProps) {
 
     try {
       const meta = metadataRef.current;
-      const { systemPrompt: latestPrompt, config: latestConfig } = reduxStateRef.current;
+      const { 
+        systemPrompt: latestPrompt, 
+        config: latestConfig, 
+        characterId: latestCharacterId, 
+        worldId: latestWorldId 
+      } = reduxStateRef.current;
       
       let title = meta.title;
       // 如果还没有 title，且有 AI 的回复，则生成标题
@@ -133,6 +141,8 @@ export default function Chat({ sessionId,firstQuestion }: ChatProps) {
         id: sessionId,
         systemPrompt: latestPrompt,
         config: latestConfig,
+        characterId: latestCharacterId,
+        worldId: latestWorldId,
         messages: msgs,
         title: title || "新会话",
         createdAt: meta.createdAt || new Date().toLocaleString(),
@@ -188,6 +198,13 @@ export default function Chat({ sessionId,firstQuestion }: ChatProps) {
           loadedSessionIdRef.current = sessionId;
         }
       } catch (err) {
+        // 如果是新会话且获取失败（文件不存在），仍需标记为已加载，以便后续保存
+        if (firstQuestion) {
+          setSessionTitle("新会话");
+          setSessionCreatedAt(new Date().toLocaleString());
+          setSessionSystemPrompt(currentSystemPrompt);
+          loadedSessionIdRef.current = sessionId;
+        }
         console.error("加载会话失败", err);
       }
     };
@@ -236,8 +253,59 @@ export default function Chat({ sessionId,firstQuestion }: ChatProps) {
     setLoading(true);
 
     try {
+      // 1. 构造增强型 System Prompt (RAG 逻辑)
+      let enhancedSystemPrompt = currentSystemPrompt;
+      
+      // A. 语义 RAG：从角色卡检索相关设定 (Faiss)
+      if (characterId) {
+        try {
+          const charRelevant = await invoke<string[]>("search_relevant_context", {
+            query: content,
+            indexId: `char_${characterId}`,
+            topK: 1
+          });
+          if (charRelevant.length > 0) {
+            enhancedSystemPrompt = `[角色设定补充]\n${charRelevant[0]}\n\n${enhancedSystemPrompt}`;
+          }
+        } catch (e) {
+          console.error("角色语义检索失败:", e);
+        }
+      }
+
+      // B. 语义 RAG：从世界书检索相关设定 (Faiss)
+      if (worldId) {
+        try {
+          const worldRelevant = await invoke<string[]>("search_relevant_context", {
+            query: content,
+            indexId: `world_${worldId}`,
+            topK: 2
+          });
+          if (worldRelevant.length > 0) {
+            const semanticWorldInfo = worldRelevant.map(t => `[语义匹配知识]\n${t}`).join("\n\n");
+            enhancedSystemPrompt += `\n\n语义关联知识：\n${semanticWorldInfo}`;
+          }
+        } catch (e) {
+          console.error("世界书语义检索失败:", e);
+        }
+        
+        // 保留原有的关键词硬触发逻辑作为补充
+        const selectedBook = worldBooks.find(b => b.id === worldId);
+        if (selectedBook) {
+          const triggeredEntries = selectedBook.entries.filter(entry => {
+            if (!entry.enabled) return false;
+            const keywords = entry.keys.split(/[,，]/).map(k => k.trim()).filter(k => k.length > 0);
+            return keywords.some(k => content.includes(k));
+          });
+
+          if (triggeredEntries.length > 0) {
+            const worldInfo = triggeredEntries.map(e => `[关键词触发：${e.keys}]\n${e.content}`).join("\n\n");
+            enhancedSystemPrompt += `\n\n关键词关联知识：\n${worldInfo}`;
+          }
+        }
+      }
+
       const fullMessages: Message[] = [
-        { role: "system", content: sessionSystemPrompt || currentSystemPrompt },
+        { role: "system", content: enhancedSystemPrompt },
         ...messages,
         userMsg
       ];
@@ -303,14 +371,34 @@ export default function Chat({ sessionId,firstQuestion }: ChatProps) {
     }
   };
 
+  const handleRollbackTo = async (index: number) => {
+    if (loading) return;
+    
+    // 截断消息列表，只保留索引之前的消息（不包含当前点击的用户消息）
+    const newMessages = messages.slice(0, index);
+    const rolledBackMsg = messages[index];
+
+    setMessages(newMessages);
+    dispatch(setReduxMessages(newMessages));
+    
+    // 将被回退的消息内容放回输入框，方便用户修改
+    if (rolledBackMsg.role === "user") {
+      setInput(rolledBackMsg.content);
+    }
+
+    // 立即持久化到后端
+    await saveCurrentSession(newMessages);
+    toast("已回退到该消息之前");
+  };
+
   return (
     <div className="flex flex-1 h-screen justify-center bg-gray-100 p-4 pt-12">
       <div className="flex flex-col flex-1 h-full w-full items-center justify-center">
-        <div className="w-full max-w-2xl h-[500px] bg-white shadow rounded-lg p-4 overflow-y-auto flex flex-col flex-1 space-y-2">
+        <div className="w-full max-w-2xl h-[500px] bg-white shadow rounded-lg p-4 overflow-y-auto flex flex-col flex-1 space-y-2 custom-scrollbar">
         {messages.map((msg, i) => (
           <div
             key={i}
-            className={`flex ${msg.role === "user" ? "justify-end" : "justify-start"}`}
+            className={`flex group ${msg.role === "user" ? "justify-end" : "justify-start"}`}
           >
             {/* 气泡 */}
             <div
@@ -318,11 +406,22 @@ export default function Chat({ sessionId,firstQuestion }: ChatProps) {
                 msg.role === "user"
                   ? "start"
                   : "end"
-              }`}
+              } relative`}
             >
-                <div className="chat-header text-black">
+                <div className="chat-header text-black flex items-center gap-2">
                     {msg.role === "user"?"user":"assistant"}
                     <time className="text-xs opacity-50 ">{msg.time}</time>
+                    
+                    {/* 用户消息旁边的回退按钮 */}
+                    {msg.role === "user" && !loading && (
+                      <button 
+                        onClick={() => handleRollbackTo(i)}
+                        className="btn btn-ghost btn-xs btn-circle opacity-0 group-hover:opacity-100 transition-opacity"
+                        title="回退到此消息之前"
+                      >
+                        <RotateCcw size={12} className="text-gray-400 hover:text-primary" />
+                      </button>
+                    )}
                 </div>
               <div  className={`chat-bubble ${
                     msg.role === "user"

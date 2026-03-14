@@ -19,7 +19,7 @@ export default function ChatPage() {
   const [startQuestion, setStartQuestion] = useState(draft);
   const [firstQuestion, setFirstQuestion] = useState(""); 
   const dispatch=useDispatch()
-  const { systemPrompt, config } = useSelector((state: RootState) => state.chat);
+  const { systemPrompt, config, characterId, worldId } = useSelector((state: RootState) => state.chat);
 
   const accordionRef = useRef<AccordionHandle>(null);
 
@@ -54,6 +54,8 @@ export default function ChatPage() {
       id: sessionId,
       systemPrompt,
       config,
+      characterId,
+      worldId,
       messages: [],
       title: "新会话",
       createdAt: now,
