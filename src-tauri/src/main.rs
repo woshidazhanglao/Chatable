@@ -15,7 +15,9 @@ use llama_cpp_2::{
     model::Special,
     sampling::LlamaSampler,
 };
+#[cfg(feature = "rag")]
 use faiss::{Index, Idx, FlatIndex, index_factory, MetricType};
+#[cfg(feature = "rag")]
 use ndarray::Array1;
 
 #[derive(Serialize)]
@@ -166,38 +168,46 @@ async fn search_relevant_context(
     index_id: String,
     top_k: usize,
 ) -> Result<Vec<String>, String> {
-    let index_path = state.indices_dir.join(format!("{}.index", index_id));
-    let map_path = state.indices_dir.join(format!("{}.map", index_id));
+    #[cfg(feature = "rag")]
+    {
+        let index_path = state.indices_dir.join(format!("{}.index", index_id));
+        let map_path = state.indices_dir.join(format!("{}.map", index_id));
 
-    if !index_path.exists() || !map_path.exists() {
-        return Ok(Vec::new());
-    }
+        if !index_path.exists() || !map_path.exists() {
+            return Ok(Vec::new());
+        }
 
-    // 1. 生成查询向量
-    let query_vec = get_text_embedding(&state, &query).await?;
-    
-    // 2. 加载 Faiss 索引
-    let mut index = faiss::read_index(index_path.to_str().unwrap())
-        .map_err(|e| format!("读取索引失败: {}", e))?;
-    
-    // 3. 搜索
-    let result = index.search(&query_vec, top_k)
-        .map_err(|e| format!("搜索失败: {}", e))?;
-    
-    // 4. 加载映射表并返回内容
-    let map_content = fs::read_to_string(map_path).map_err(|e| e.to_string())?;
-    let text_map: Vec<String> = serde_json::from_str(&map_content).map_err(|e| e.to_string())?;
-    
-    let mut relevant_texts = Vec::new();
-    for &id in &result.labels {
-        if let Some(val) = id.get() {
-            if let Some(text) = text_map.get(val as usize) {
-                relevant_texts.push(text.clone());
+        // 1. 生成查询向量
+        let query_vec = get_text_embedding(&state, &query).await?;
+        
+        // 2. 加载 Faiss 索引
+        let mut index = faiss::read_index(index_path.to_str().unwrap())
+            .map_err(|e| format!("读取索引失败: {}", e))?;
+        
+        // 3. 搜索
+        let result = index.search(&query_vec, top_k)
+            .map_err(|e| format!("搜索失败: {}", e))?;
+        
+        // 4. 加载映射表并返回内容
+        let map_content = fs::read_to_string(map_path).map_err(|e| e.to_string())?;
+        let text_map: Vec<String> = serde_json::from_str(&map_content).map_err(|e| e.to_string())?;
+        
+        let mut relevant_texts = Vec::new();
+        for &id in &result.labels {
+            if let Some(val) = id.get() {
+                if let Some(text) = text_map.get(val as usize) {
+                    relevant_texts.push(text.clone());
+                }
             }
         }
-    }
 
-    Ok(relevant_texts)
+        Ok(relevant_texts)
+    }
+    #[cfg(not(feature = "rag"))]
+    {
+        let _ = (state, query, index_id, top_k);
+        Ok(Vec::new())
+    }
 }
 
 #[tauri::command]
@@ -206,28 +216,36 @@ async fn rebuild_index(
     index_id: String,
     texts: Vec<String>,
 ) -> Result<(), String> {
-    if texts.is_empty() { return Ok(()); }
+    #[cfg(feature = "rag")]
+    {
+        if texts.is_empty() { return Ok(()); }
 
-    let mut embeddings = Vec::new();
-    for text in &texts {
-        let vec = get_text_embedding(&state, text).await?;
-        embeddings.extend(vec);
+        let mut embeddings = Vec::new();
+        for text in &texts {
+            let vec = get_text_embedding(&state, text).await?;
+            embeddings.extend(vec);
+        }
+
+        let dim = (embeddings.len() / texts.len()) as u32;
+        let mut index = FlatIndex::new_l2(dim).map_err(|e| e.to_string())?;
+        index.add(&embeddings).map_err(|e| e.to_string())?;
+
+        let index_path = state.indices_dir.join(format!("{}.index", index_id));
+        let map_path = state.indices_dir.join(format!("{}.map", index_id));
+
+        faiss::write_index(&index, index_path.to_str().unwrap())
+            .map_err(|e| format!("写入索引失败: {}", e))?;
+        
+        let map_content = serde_json::to_string(&texts).map_err(|e| e.to_string())?;
+        fs::write(map_path, map_content).map_err(|e| e.to_string())?;
+
+        Ok(())
     }
-
-    let dim = (embeddings.len() / texts.len()) as u32;
-    let mut index = FlatIndex::new_l2(dim).map_err(|e| e.to_string())?;
-    index.add(&embeddings).map_err(|e| e.to_string())?;
-
-    let index_path = state.indices_dir.join(format!("{}.index", index_id));
-    let map_path = state.indices_dir.join(format!("{}.map", index_id));
-
-    faiss::write_index(&index, index_path.to_str().unwrap())
-        .map_err(|e| format!("写入索引失败: {}", e))?;
-    
-    let map_content = serde_json::to_string(&texts).map_err(|e| e.to_string())?;
-    fs::write(map_path, map_content).map_err(|e| e.to_string())?;
-
-    Ok(())
+    #[cfg(not(feature = "rag"))]
+    {
+        let _ = (state, index_id, texts);
+        Ok(())
+    }
 }
 
 #[tauri::command]

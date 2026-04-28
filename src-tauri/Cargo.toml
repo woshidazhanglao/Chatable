@@ -17,6 +17,10 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
+[features]
+default = []
+rag = ["faiss", "ndarray"]
+
 [dependencies]
 tauri = { version = "2", features = [] }
 tauri-plugin-opener = "2"
@@ -31,5 +35,5 @@ chrono = "0.4.44"
 llama-cpp-2 = "0.1.11"
 tokio = { version = "1", features = ["full"] }
 futures-util = "0.3"
-faiss = "0.13.0"
-ndarray = "0.15"
+faiss = { version = "0.12", optional = true }
+ndarray = { version = "0.15", optional = true }
